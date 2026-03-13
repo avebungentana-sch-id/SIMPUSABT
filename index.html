@@ -494,7 +494,33 @@
 
         const MemberForm = ({ defaultValues, isEdit, onSubmit }) => {
             const [photo, setPhoto] = useState(defaultValues?.photo || null);
-            const handleFile = (e) => { const file = e.target.files[0]; if (file) { const reader = new FileReader(); reader.onloadend = () => { setPhoto(reader.result); }; reader.readAsDataURL(file); } };
+            const handleFile = (e) => { 
+                const file = e.target.files[0]; 
+                if (file) { 
+                    const reader = new FileReader(); 
+                    reader.onloadend = () => { 
+                        const img = new Image();
+                        img.onload = () => {
+                            // Buat elemen canvas untuk mengompres gambar
+                            const canvas = document.createElement('canvas');
+                            const MAX_WIDTH = 300; // Lebar maksimal foto profil
+                            const scaleSize = MAX_WIDTH / img.width;
+                            
+                            canvas.width = MAX_WIDTH;
+                            canvas.height = img.height * scaleSize;
+                            
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                            
+                            // Kompresi menjadi JPEG dengan kualitas 70%
+                            const compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
+                            setPhoto(compressedBase64); // Simpan hasil kompresi
+                        };
+                        img.src = reader.result;
+                    }; 
+                    reader.readAsDataURL(file); 
+                } 
+            };
             const submit = (e) => { e.preventDefault(); const fd = new FormData(e.target); const obj = Object.fromEntries(fd.entries()); obj.photo = photo; onSubmit(obj); };
             return (
                 <form onSubmit={submit} className="space-y-4">
