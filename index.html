@@ -585,37 +585,78 @@
             const handleAddItem = async (collection, item) => {
                 const idPrefix = collection === 'books' ? 'B' : 'M';
                 const newItem = { ...item, id: item.id || `${idPrefix}${Date.now()}` };
+                
+                // Tambahkan pengecekan error saat Insert ke Supabase
+                const { error } = await supabase.from(collection).insert([newItem]);
+                
+                if (error) {
+                    console.error(`Error insert ${collection}:`, error);
+                    alert(`Gagal menyimpan data ke ${collection}!\nPesan Error: ${error.message}\n(Cek RLS/Kolom di Supabase)`);
+                    return; // Hentikan eksekusi jika gagal
+                }
+
+                // Jika berhasil, baru update tampilan (UI)
                 setData(prev => ({ ...prev, [collection]: [...prev[collection], newItem] }));
                 setIsModalOpen(false);
-                await supabase.from(collection).insert([newItem]);
             };
 
             const handleUpdateItem = async (collection, item) => {
+                const { error } = await supabase.from(collection).update(item).eq('id', item.id);
+                
+                if (error) {
+                    console.error(`Error update ${collection}:`, error);
+                    alert(`Gagal mengupdate data!\nPesan Error: ${error.message}`);
+                    return;
+                }
+
                 setData(prev => ({ ...prev, [collection]: prev[collection].map(i => i.id === item.id ? item : i) }));
                 setIsModalOpen(false);
-                await supabase.from(collection).update(item).eq('id', item.id);
             };
 
             const handleDeleteItem = async (collection, id) => {
                 if (window.confirm("Yakin ingin menghapus data ini?")) {
+                    const { error } = await supabase.from(collection).delete().eq('id', id);
+                    
+                    if (error) {
+                        console.error(`Error delete ${collection}:`, error);
+                        alert(`Gagal menghapus data!\nPesan Error: ${error.message}`);
+                        return;
+                    }
+
                     setData(prev => ({ ...prev, [collection]: prev[collection].filter(i => i.id !== id) }));
-                    await supabase.from(collection).delete().eq('id', id);
                 }
             };
 
             const handleTransaction = async (txData) => {
                 if(txData.isReservation) {
                     const newRes = { id: `R${Date.now()}`, bookId: txData.bookId, memberId: txData.memberId, requestDate: new Date().toISOString(), status: 'pending' };
+                    
+                    const { error } = await supabase.from('reservations').insert([newRes]);
+                    if (error) {
+                        alert("Gagal membuat reservasi: " + error.message);
+                        return;
+                    }
+
                     setData(prev => ({ ...prev, reservations: [...prev.reservations, newRes] }));
                     alert("Berhasil masuk antrean reservasi.");
-                    await supabase.from('reservations').insert([newRes]);
                 } else {
                     const newTransaction = { id: `T${Date.now()}`, bookId: txData.bookId, memberId: txData.memberId, borrowDate: new Date().toISOString(), dueDate: new Date(Date.now() + (data.settings.loanDuration * 24 * 60 * 60 * 1000)).toISOString(), returnDate: null, status: 'borrowed', fine: 0 };
+                    const book = data.books.find(b => b.id === txData.bookId);
+                    
+                    // Lakukan transaksi ke Supabase terlebih dahulu
+                    const { error: txError } = await supabase.from('transactions').insert([newTransaction]);
+                    if (txError) {
+                        alert("Gagal memproses transaksi: " + txError.message);
+                        return;
+                    }
+
+                    if (book) {
+                        const { error: bookError } = await supabase.from('books').update({ stock: book.stock - 1 }).eq('id', txData.bookId);
+                        if(bookError) console.error("Gagal update stok buku:", bookError);
+                    }
+
                     const updatedBooks = data.books.map(b => b.id === txData.bookId ? { ...b, stock: b.stock - 1 } : b);
                     setData(prev => ({ ...prev, books: updatedBooks, transactions: [...prev.transactions, newTransaction] }));
-                    await supabase.from('transactions').insert([newTransaction]);
-                    const book = data.books.find(b => b.id === txData.bookId);
-                    if (book) await supabase.from('books').update({ stock: book.stock - 1 }).eq('id', txData.bookId);
                 }
                 setIsModalOpen(false);
             };
@@ -627,18 +668,33 @@
                 const now = new Date(); now.setHours(0,0,0,0);
                 let fine = 0; if (now > due) { const diffDays = Math.ceil((now - due) / (1000 * 60 * 60 * 24)); fine = diffDays * data.settings.finePerDay; }
                 const returnDate = new Date().toISOString();
+                
+                const { error: txError } = await supabase.from('transactions').update({ returnDate, status: 'returned', fine }).eq('id', transactionId);
+                if (txError) {
+                    alert("Gagal memproses pengembalian: " + txError.message);
+                    return;
+                }
+
+                const book = data.books.find(b => b.id === tx.bookId);
+                if (book) {
+                    await supabase.from('books').update({ stock: book.stock + 1 }).eq('id', tx.bookId);
+                }
+
                 const updatedTx = data.transactions.map(t => t.id === transactionId ? { ...t, returnDate, status: 'returned', fine } : t);
                 const updatedBooks = data.books.map(b => b.id === tx.bookId ? { ...b, stock: b.stock + 1 } : b);
                 setData(prev => ({ ...prev, books: updatedBooks, transactions: updatedTx }));
-                await supabase.from('transactions').update({ returnDate, status: 'returned', fine }).eq('id', transactionId);
-                const book = data.books.find(b => b.id === tx.bookId);
-                if (book) await supabase.from('books').update({ stock: book.stock + 1 }).eq('id', tx.bookId);
             };
 
             const handleSaveSettings = async (newSettings) => {
+                const { error } = await supabase.from('settings').upsert({ id: 1, config: newSettings });
+                
+                if (error) {
+                    alert("Gagal menyimpan pengaturan: " + error.message);
+                    return;
+                }
+
                 setData(prev => ({ ...prev, settings: newSettings }));
                 alert("Pengaturan berhasil disimpan!");
-                await supabase.from('settings').upsert({ id: 1, config: newSettings });
             };
 
             const handleAddAdmin = async (e) => {
@@ -649,6 +705,59 @@
                     if (error) throw error;
                     alert("Admin baru berhasil didaftarkan!"); e.target.reset();
                 } catch (err) { alert("Gagal menambah admin: " + err.message); }
+            };
+
+            // --- IMPORT / EXPORT HANDLERS ---
+            const getTemplate = (type) => {
+                if (type === 'books') {
+                    return "id,title,author,year,isbn,publisher,category,location,ebook_link,stock\nB_999,Buku Contoh,Penulis,2024,123-456,Penerbit X,000 - Karya Umum,Rak 1,https://link.com,10";
+                }
+                if (type === 'members') {
+                    return "id,name,nis,class,phone,active\nM_999,Siswa Contoh,12345,X IPA 1,0812345678,true";
+                }
+                return "";
+            };
+
+            const handleImportCSV = async (e, collection) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const text = event.target.result;
+                    const parsedData = csvToJSON(text);
+                    
+                    if (parsedData.length === 0) {
+                        alert("Data CSV kosong atau format tidak sesuai template.");
+                        e.target.value = null;
+                        return;
+                    }
+
+                    // Format data & pastikan tipe datanya benar sebelum dikirim ke Supabase
+                    const cleanedData = parsedData.map((item, idx) => {
+                        const idPrefix = collection === 'books' ? 'B' : 'M';
+                        if (!item.id) item.id = `${idPrefix}${Date.now()}${idx}`;
+                        
+                        if (collection === 'books') {
+                            item.stock = parseInt(item.stock) || 0;
+                        } else if (collection === 'members') {
+                            item.active = String(item.active).toLowerCase() === 'true';
+                        }
+                        return item;
+                    });
+
+                    if (window.confirm(`Yakin ingin mengimpor ${cleanedData.length} data ke ${collection}?`)) {
+                        const { error } = await supabase.from(collection).insert(cleanedData);
+                        if (error) {
+                            alert(`Gagal impor data:\n${error.message}`);
+                        } else {
+                            setData(prev => ({ ...prev, [collection]: [...prev[collection], ...cleanedData] }));
+                            alert(`Berhasil mengimpor ${cleanedData.length} data!`);
+                        }
+                    }
+                    e.target.value = null; // Reset input agar bisa upload file yang sama lagi jika perlu
+                };
+                reader.readAsText(file);
             };
 
             // RENDERERS
@@ -766,5 +875,4 @@
         root.render(<App />);
     </script>
 </body>
-
 </html>
