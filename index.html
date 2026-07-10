@@ -94,6 +94,10 @@
             return (value || '').toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
+        function escapeHtml(value) {
+            return escapeAttr(value);
+        }
+
         function escapeJsArg(value) {
             return escapeAttr((value || '').toString().replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' '));
         }
@@ -109,6 +113,22 @@
                 normalizeSearch(m.id).includes(q) ||
                 normalizeSearch(m.nis).includes(q) ||
                 normalizeSearch(m.name).includes(q)
+            ) || null;
+        }
+
+        function findBookByQuery(query) {
+            const q = normalizeSearch(query);
+            if (!q) return null;
+            return state.books.find(b =>
+                normalizeSearch(b.id) === q ||
+                normalizeSearch(b.title) === q ||
+                normalizeSearch(b.isbn) === q ||
+                normalizeSearch(b.shelf) === q
+            ) || state.books.find(b =>
+                normalizeSearch(b.id).includes(q) ||
+                normalizeSearch(b.title).includes(q) ||
+                normalizeSearch(b.isbn).includes(q) ||
+                normalizeSearch(b.shelf).includes(q)
             ) || null;
         }
 
@@ -1226,19 +1246,20 @@
             e.preventDefault();
             const typedMember = document.getElementById('circ-member-search').value;
             const selectedMember = document.getElementById('circ-member').value;
-            const bId = document.getElementById('circ-book').value;
+            const typedBook = document.getElementById('circ-book-search').value;
+            const selectedBook = document.getElementById('circ-book').value;
 
             await refreshDataFromServerForTransaction();
 
             const member = state.members.find(m => m.id === selectedMember) || findMemberByQuery(typedMember);
+            const book = state.books.find(b => b.id === selectedBook) || findBookByQuery(typedBook);
 
-            if (!member || !bId) { triggerAlert("Error", "Pilih anggota dan buku dari saran autocomplete, atau ketik nama/NIS/ID anggota yang valid.", "error"); return; }
-            const book = state.books.find(b => b.id === bId);
+            if (!member || !book) { triggerAlert("Error", "Pilih anggota dan buku dari saran autocomplete, atau ketik data yang valid.", "error"); return; }
             if (!book || book.stock <= 0) { triggerAlert("Gagal", "Buku tidak tersedia.", "error"); return; }
 
             book.stock -= 1;
             state.borrows.push({
-                id: generateId(), bookId: bId, memberId: member.id,
+                id: generateId(), bookId: book.id, memberId: member.id,
                 borrowDate: new Date().toISOString(), status: 'borrowed'
             });
             state.circNewBorrowOpen = false;
@@ -1248,38 +1269,58 @@
         // Autocomplete functions
         function filterCircMember(val) {
             const dropdown = document.getElementById('circ-member-dropdown');
-            document.getElementById('circ-member').value = "";
+            const hidden = document.getElementById('circ-member');
+            if (!dropdown || !hidden) return;
+            hidden.value = "";
             if (!val) { dropdown.classList.add('hidden'); return; }
             
+            const q = normalizeSearch(val);
             const matches = state.members.filter(m => 
-                (m.name||'').toLowerCase().includes(val.toLowerCase()) || 
-                (m.nis||'').toLowerCase().includes(val.toLowerCase()) ||
-                (m.id||'').toLowerCase().includes(val.toLowerCase())
-            ).slice(0,5);
+                normalizeSearch(m.name).includes(q) || 
+                normalizeSearch(m.nis).includes(q) ||
+                normalizeSearch(m.id).includes(q)
+            ).slice(0,8);
             dropdown.innerHTML = matches.map(m => {
-                const safeName = escapeJsArg(m.name);
-                const safeId = escapeJsArg(m.id);
-                return `<div onclick="document.getElementById('circ-member').value='${safeId}'; document.getElementById('circ-member-search').value='${safeName}'; document.getElementById('circ-member-dropdown').classList.add('hidden');" class="p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold">${m.name}</p><p class="text-[10px] text-slate-500">NIS: ${m.nis} | ID: ${m.id}</p></div>`;
+                return `<button type="button" onclick="selectCircMember('${escapeJsArg(m.id)}')" class="block w-full text-left p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold">${escapeHtml(m.name)}</p><p class="text-[10px] text-slate-500">NIS: ${escapeHtml(m.nis || '-')} | ID: ${escapeHtml(m.id)}</p></button>`;
             }).join('') || '<div class="p-3 text-sm text-slate-400">Tidak ditemukan</div>';
             dropdown.classList.remove('hidden');
         }
 
+        function selectCircMember(id) {
+            const member = state.members.find(m => m.id === id);
+            if (!member) return;
+            document.getElementById('circ-member').value = member.id;
+            document.getElementById('circ-member-search').value = `${member.name} (${member.nis || member.id})`;
+            document.getElementById('circ-member-dropdown').classList.add('hidden');
+        }
+
         function filterCircBook(val) {
             const dropdown = document.getElementById('circ-book-dropdown');
-            document.getElementById('circ-book').value = "";
+            const hidden = document.getElementById('circ-book');
+            if (!dropdown || !hidden) return;
+            hidden.value = "";
             if (!val) { dropdown.classList.add('hidden'); return; }
             
+            const q = normalizeSearch(val);
             const matches = state.books.filter(b => 
-                (b.title||'').toLowerCase().includes(val.toLowerCase()) || 
-                (b.id||'').toLowerCase().includes(val.toLowerCase())
-            ).slice(0,5);
+                normalizeSearch(b.title).includes(q) || 
+                normalizeSearch(b.id).includes(q) ||
+                normalizeSearch(b.isbn).includes(q) ||
+                normalizeSearch(b.shelf).includes(q)
+            ).slice(0,8);
             dropdown.innerHTML = matches.map(b => {
-                const safeTitle = escapeJsArg(b.title);
-                const safeId = escapeJsArg(b.id);
-                if (b.stock <= 0) return `<div class="p-3 text-sm border-b border-slate-100 opacity-50 cursor-not-allowed"><p class="font-bold line-clamp-1">${b.title}</p><p class="text-[10px] text-rose-500">Stok Habis | ID: ${b.id}</p></div>`;
-                return `<div onclick="document.getElementById('circ-book').value='${safeId}'; document.getElementById('circ-book-search').value='${safeTitle}'; document.getElementById('circ-book-dropdown').classList.add('hidden');" class="p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold line-clamp-1">${b.title}</p><p class="text-[10px] text-emerald-600">Stok: ${b.stock} | ID: ${b.id}</p></div>`;
+                if (b.stock <= 0) return `<div class="p-3 text-sm border-b border-slate-100 opacity-50 cursor-not-allowed"><p class="font-bold line-clamp-1">${escapeHtml(b.title)}</p><p class="text-[10px] text-rose-500">Stok Habis | ID: ${escapeHtml(b.id)}</p></div>`;
+                return `<button type="button" onclick="selectCircBook('${escapeJsArg(b.id)}')" class="block w-full text-left p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold line-clamp-1">${escapeHtml(b.title)}</p><p class="text-[10px] text-emerald-600">Stok: ${b.stock} | ID: ${escapeHtml(b.id)}</p></button>`;
             }).join('') || '<div class="p-3 text-sm text-slate-400">Tidak ditemukan</div>';
             dropdown.classList.remove('hidden');
+        }
+
+        function selectCircBook(id) {
+            const book = state.books.find(b => b.id === id);
+            if (!book) return;
+            document.getElementById('circ-book').value = book.id;
+            document.getElementById('circ-book-search').value = book.title;
+            document.getElementById('circ-book-dropdown').classList.add('hidden');
         }
 
         function renderSirkulasiTab() {
@@ -1369,12 +1410,12 @@
                     <div class="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50"><h3 class="font-bold text-slate-800">Pinjam Manual (Autocomplete)</h3><button onclick="state.circNewBorrowOpen=false; render()" class="text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-5 h-5"></i></button></div>
                     <form onsubmit="executeBorrowBook(event)" class="p-6 space-y-5">
                         <div class="relative"><label class="block text-sm font-bold text-slate-700 mb-1">Anggota (Ketik Nama/NIS/ID)</label>
-                            <input type="text" id="circ-member-search" autocomplete="off" oninput="filterCircMember(this.value)" placeholder="Cari..." class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm">
-                            <input type="hidden" id="circ-member"><div id="circ-member-dropdown" class="absolute z-10 w-full bg-white border border-slate-200 rounded-xl shadow-lg mt-1 hidden max-h-48 overflow-y-auto"></div>
+                            <input type="text" id="circ-member-search" autocomplete="off" oninput="filterCircMember(this.value)" onfocus="filterCircMember(this.value)" placeholder="Cari..." class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm">
+                            <input type="hidden" id="circ-member"><div id="circ-member-dropdown" class="absolute z-[60] w-full bg-white border border-slate-200 rounded-xl shadow-lg mt-1 hidden max-h-48 overflow-y-auto"></div>
                         </div>
                         <div class="relative"><label class="block text-sm font-bold text-slate-700 mb-1">Buku (Ketik Judul atau Kode Panggil/ID)</label>
-                            <input type="text" id="circ-book-search" autocomplete="off" oninput="filterCircBook(this.value)" placeholder="Cari..." class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm">
-                            <input type="hidden" id="circ-book"><div id="circ-book-dropdown" class="absolute z-10 w-full bg-white border border-slate-200 rounded-xl shadow-lg mt-1 hidden max-h-48 overflow-y-auto"></div>
+                            <input type="text" id="circ-book-search" autocomplete="off" oninput="filterCircBook(this.value)" onfocus="filterCircBook(this.value)" placeholder="Cari..." class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 text-sm">
+                            <input type="hidden" id="circ-book"><div id="circ-book-dropdown" class="absolute z-[60] w-full bg-white border border-slate-200 rounded-xl shadow-lg mt-1 hidden max-h-48 overflow-y-auto"></div>
                         </div>
                         <button type="submit" class="w-full py-2.5 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700">Simpan Peminjaman</button>
                     </form>
