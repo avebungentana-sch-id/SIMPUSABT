@@ -86,6 +86,32 @@
             return d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' });
         }
 
+        function normalizeSearch(value) {
+            return (value || '').toString().trim().toLowerCase();
+        }
+
+        function escapeAttr(value) {
+            return (value || '').toString().replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function escapeJsArg(value) {
+            return escapeAttr((value || '').toString().replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' '));
+        }
+
+        function findMemberByQuery(query) {
+            const q = normalizeSearch(query);
+            if (!q) return null;
+            return state.members.find(m =>
+                normalizeSearch(m.id) === q ||
+                normalizeSearch(m.nis) === q ||
+                normalizeSearch(m.name) === q
+            ) || state.members.find(m =>
+                normalizeSearch(m.id).includes(q) ||
+                normalizeSearch(m.nis).includes(q) ||
+                normalizeSearch(m.name).includes(q)
+            ) || null;
+        }
+
         async function initStorage() {
             const data = localStorage.getItem(LS_KEY);
             if (data) {
@@ -175,6 +201,64 @@
             
             // HANYA menyimpan ke local storage, MENCEGAH terjadinya auto push
             localStorage.setItem(LS_KEY, JSON.stringify(dataToSave));
+        }
+
+        async function refreshDataFromServerForTransaction() {
+            if (GAS_URL === '') return false;
+            try {
+                const response = await fetch(GAS_URL);
+                const cloudData = await response.json();
+                if (cloudData.books) state.books = cloudData.books;
+                if (cloudData.members) state.members = cloudData.members;
+                if (cloudData.borrows) state.borrows = cloudData.borrows;
+                if (cloudData.requests) state.requests = cloudData.requests;
+                if (cloudData.dbCategories) state.dbCategories = cloudData.dbCategories;
+                if (cloudData.settings && Object.keys(cloudData.settings).length > 0) state.settings = cloudData.settings;
+                saveStorage();
+                return true;
+            } catch (error) {
+                console.warn('Gagal memuat data server sebelum transaksi:', error);
+                return false;
+            }
+        }
+
+        async function syncTransactionsToServer(successMessage = '') {
+            saveStorage();
+            if (GAS_URL === '') {
+                triggerAlert('Tersimpan Lokal', 'URL Web App GAS belum diatur, sehingga data baru tersimpan di perangkat ini.', 'info');
+                return false;
+            }
+
+            state.isLoading = true;
+            state.loadingMsg = 'Menyimpan transaksi ke database...';
+            render();
+            try {
+                const dataToSave = {
+                    books: state.books,
+                    members: state.members,
+                    borrows: state.borrows,
+                    requests: state.requests,
+                    dbCategories: state.dbCategories,
+                    settings: state.settings
+                };
+                const response = await fetch(GAS_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify(dataToSave)
+                });
+                const resData = await response.json();
+                if (resData.status !== 'success') throw new Error(resData.message || 'Server tidak mengembalikan status sukses.');
+                saveStorage();
+                if (successMessage) triggerAlert('Berhasil', successMessage, 'success');
+                return true;
+            } catch (error) {
+                console.error('Gagal sinkron transaksi ke GAS:', error);
+                triggerAlert('Tersimpan Lokal', 'Transaksi tersimpan di perangkat ini, tetapi gagal dikirim ke database. Periksa koneksi atau Web App GAS.', 'error');
+                return false;
+            } finally {
+                state.isLoading = false;
+                render();
+            }
         }
 
         async function pushToServer() {
@@ -285,15 +369,19 @@
             render();
         }
 
-        function submitPublicLoanRequest(e) {
+        async function submitPublicLoanRequest(e) {
             e.preventDefault();
+            const selectedMemberId = document.getElementById('public-req-member-id')?.value || '';
             const memberInput = document.getElementById('public-req-nis').value.trim();
-            if (!memberInput) { triggerAlert("Error", "Masukkan NIS atau ID Anggota.", "error"); return; }
+            const bookId = state.requestLoanBookId;
+            if (!memberInput && !selectedMemberId) { triggerAlert("Error", "Masukkan nama, NIS, atau ID Anggota.", "error"); return; }
+
+            await refreshDataFromServerForTransaction();
             
-            const member = state.members.find(m => m.nis === memberInput || m.id === memberInput);
+            const member = state.members.find(m => m.id === selectedMemberId) || findMemberByQuery(memberInput);
             if (!member) { triggerAlert("Gagal", "Data anggota tidak ditemukan.", "error"); return; }
             
-            const book = state.books.find(b => b.id === state.requestLoanBookId);
+            const book = state.books.find(b => b.id === bookId);
             if (!book || book.stock <= 0) { triggerAlert("Gagal", "Buku tidak tersedia.", "error"); return; }
 
             // Cek apakah sudah ada request pending untuk buku ini oleh user ini
@@ -307,9 +395,39 @@
                 status: 'pending',
                 requestDate: new Date().toISOString()
             });
-            saveStorage();
+            await syncTransactionsToServer("Pengajuan terkirim dan sudah masuk database. Silakan ke meja petugas perpustakaan.");
             closeRequestModal();
-            triggerAlert("Berhasil", "Pengajuan terkirim. Silakan ke meja petugas perpustakaan.", "success");
+        }
+
+        function filterPublicMember(val) {
+            const dropdown = document.getElementById('public-member-dropdown');
+            const hidden = document.getElementById('public-req-member-id');
+            if (hidden) hidden.value = '';
+            if (!dropdown) return;
+            if (!val) { dropdown.classList.add('hidden'); return; }
+
+            const q = normalizeSearch(val);
+            const matches = state.members.filter(m =>
+                normalizeSearch(m.name).includes(q) ||
+                normalizeSearch(m.nis).includes(q) ||
+                normalizeSearch(m.id).includes(q)
+            ).slice(0, 6);
+
+            dropdown.innerHTML = matches.map(m => `
+                <div onclick="selectPublicMember('${escapeJsArg(m.id)}')" class="p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100">
+                    <p class="font-bold">${m.name}</p>
+                    <p class="text-[10px] text-slate-500">NIS: ${m.nis || '-'} | ID: ${m.id}</p>
+                </div>
+            `).join('') || '<div class="p-3 text-sm text-slate-400">Anggota tidak ditemukan</div>';
+            dropdown.classList.remove('hidden');
+        }
+
+        function selectPublicMember(id) {
+            const member = state.members.find(m => m.id === id);
+            if (!member) return;
+            document.getElementById('public-req-member-id').value = member.id;
+            document.getElementById('public-req-nis').value = `${member.name} (${member.nis || member.id})`;
+            document.getElementById('public-member-dropdown').classList.add('hidden');
         }
 
         function renderPublicOPAC() {
@@ -335,8 +453,12 @@
                         <button onclick="closeRequestModal()" class="text-slate-400 hover:text-slate-600"><i data-lucide="x" class="w-5 h-5"></i></button>
                     </div>
                     <form onsubmit="submitPublicLoanRequest(event)" class="p-5">
-                        <p class="text-sm text-slate-600 mb-4 leading-relaxed">Masukkan NIS atau ID Anggota Anda untuk meminjam buku <b class="text-indigo-600">${state.books.find(b=>b.id===state.requestLoanBookId)?.title}</b>.</p>
-                        <input type="text" id="public-req-nis" value="${state.requestMemberId}" placeholder="Contoh: 1001" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 mb-5 transition-all">
+                        <p class="text-sm text-slate-600 mb-4 leading-relaxed">Masukkan nama, NIS, atau ID Anggota Anda untuk meminjam buku <b class="text-indigo-600">${state.books.find(b=>b.id===state.requestLoanBookId)?.title}</b>.</p>
+                        <div class="relative mb-5">
+                            <input type="text" id="public-req-nis" value="${state.requestMemberId}" autocomplete="off" oninput="filterPublicMember(this.value)" placeholder="Ketik nama / NIS / ID..." class="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-500 transition-all">
+                            <input type="hidden" id="public-req-member-id">
+                            <div id="public-member-dropdown" class="absolute z-10 w-full bg-white border border-slate-200 rounded-xl shadow-lg mt-1 hidden max-h-48 overflow-y-auto"></div>
+                        </div>
                         <button type="submit" class="w-full bg-indigo-600 text-white rounded-xl py-3 font-bold hover:bg-indigo-700 transition-colors shadow-md">Kirim Pengajuan</button>
                     </form>
                 </div>
@@ -1044,7 +1166,8 @@
             </div>`;
         }
 
-        function processRequest(reqId, action) {
+        async function processRequest(reqId, action) {
+            await refreshDataFromServerForTransaction();
             const req = state.requests.find(r => r.id === reqId);
             if (!req) return;
             const book = state.books.find(b => b.id === req.bookId);
@@ -1057,12 +1180,11 @@
                     borrowDate: new Date().toISOString(), status: 'borrowed'
                 });
                 req.status = 'approved';
-                triggerAlert("Disetujui", "Pengajuan berhasil diproses.", "success");
+                await syncTransactionsToServer("Pengajuan disetujui dan status peminjaman sudah masuk database.");
             } else {
                 req.status = 'rejected';
+                await syncTransactionsToServer("Pengajuan ditolak dan statusnya sudah masuk database.");
             }
-            saveStorage();
-            render();
         }
 
         function returnBook(borrowId) {
@@ -1087,35 +1209,40 @@
                 }
             }
 
-            triggerConfirm("Pengembalian Buku", confirmMessage, () => {
-                if (borrow.status === 'borrowed') {
-                    borrow.status = 'returned';
-                    borrow.returnDate = new Date().toISOString();
-                    const book = state.books.find(b => b.id === borrow.bookId);
+            triggerConfirm("Pengembalian Buku", confirmMessage, async () => {
+                await refreshDataFromServerForTransaction();
+                const latestBorrow = state.borrows.find(b => b.id === borrowId);
+                if (latestBorrow && latestBorrow.status === 'borrowed') {
+                    latestBorrow.status = 'returned';
+                    latestBorrow.returnDate = new Date().toISOString();
+                    const book = state.books.find(b => b.id === latestBorrow.bookId);
                     if (book) book.stock += 1;
-                    saveStorage();
-                    triggerAlert("Berhasil", "Buku dikembalikan ke rak.", "success");
+                    await syncTransactionsToServer("Buku dikembalikan dan statusnya sudah masuk database.");
                 }
             });
         }
 
-        function executeBorrowBook(e) {
+        async function executeBorrowBook(e) {
             e.preventDefault();
-            const mId = document.getElementById('circ-member').value;
+            const typedMember = document.getElementById('circ-member-search').value;
+            const selectedMember = document.getElementById('circ-member').value;
             const bId = document.getElementById('circ-book').value;
 
-            if (!mId || !bId) { triggerAlert("Error", "Pilih anggota dan buku dari saran *autocomplete*.", "error"); return; }
+            await refreshDataFromServerForTransaction();
+
+            const member = state.members.find(m => m.id === selectedMember) || findMemberByQuery(typedMember);
+
+            if (!member || !bId) { triggerAlert("Error", "Pilih anggota dan buku dari saran autocomplete, atau ketik nama/NIS/ID anggota yang valid.", "error"); return; }
             const book = state.books.find(b => b.id === bId);
             if (!book || book.stock <= 0) { triggerAlert("Gagal", "Buku tidak tersedia.", "error"); return; }
 
             book.stock -= 1;
             state.borrows.push({
-                id: generateId(), bookId: bId, memberId: mId,
+                id: generateId(), bookId: bId, memberId: member.id,
                 borrowDate: new Date().toISOString(), status: 'borrowed'
             });
-            saveStorage();
             state.circNewBorrowOpen = false;
-            triggerAlert("Berhasil", "Peminjaman dicatat.", "success");
+            await syncTransactionsToServer("Peminjaman dicatat dan langsung masuk database.");
         }
 
         // Autocomplete functions
@@ -1130,8 +1257,9 @@
                 (m.id||'').toLowerCase().includes(val.toLowerCase())
             ).slice(0,5);
             dropdown.innerHTML = matches.map(m => {
-                const safeName = m.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                return `<div onclick="document.getElementById('circ-member').value='${m.id}'; document.getElementById('circ-member-search').value='${safeName}'; document.getElementById('circ-member-dropdown').classList.add('hidden');" class="p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold">${m.name}</p><p class="text-[10px] text-slate-500">NIS: ${m.nis} | ID: ${m.id}</p></div>`;
+                const safeName = escapeJsArg(m.name);
+                const safeId = escapeJsArg(m.id);
+                return `<div onclick="document.getElementById('circ-member').value='${safeId}'; document.getElementById('circ-member-search').value='${safeName}'; document.getElementById('circ-member-dropdown').classList.add('hidden');" class="p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold">${m.name}</p><p class="text-[10px] text-slate-500">NIS: ${m.nis} | ID: ${m.id}</p></div>`;
             }).join('') || '<div class="p-3 text-sm text-slate-400">Tidak ditemukan</div>';
             dropdown.classList.remove('hidden');
         }
@@ -1146,9 +1274,10 @@
                 (b.id||'').toLowerCase().includes(val.toLowerCase())
             ).slice(0,5);
             dropdown.innerHTML = matches.map(b => {
-                const safeTitle = b.title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                const safeTitle = escapeJsArg(b.title);
+                const safeId = escapeJsArg(b.id);
                 if (b.stock <= 0) return `<div class="p-3 text-sm border-b border-slate-100 opacity-50 cursor-not-allowed"><p class="font-bold line-clamp-1">${b.title}</p><p class="text-[10px] text-rose-500">Stok Habis | ID: ${b.id}</p></div>`;
-                return `<div onclick="document.getElementById('circ-book').value='${b.id}'; document.getElementById('circ-book-search').value='${safeTitle}'; document.getElementById('circ-book-dropdown').classList.add('hidden');" class="p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold line-clamp-1">${b.title}</p><p class="text-[10px] text-emerald-600">Stok: ${b.stock} | ID: ${b.id}</p></div>`;
+                return `<div onclick="document.getElementById('circ-book').value='${safeId}'; document.getElementById('circ-book-search').value='${safeTitle}'; document.getElementById('circ-book-dropdown').classList.add('hidden');" class="p-3 hover:bg-slate-50 cursor-pointer text-sm border-b border-slate-100"><p class="font-bold line-clamp-1">${b.title}</p><p class="text-[10px] text-emerald-600">Stok: ${b.stock} | ID: ${b.id}</p></div>`;
             }).join('') || '<div class="p-3 text-sm text-slate-400">Tidak ditemukan</div>';
             dropdown.classList.remove('hidden');
         }
